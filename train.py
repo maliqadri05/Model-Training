@@ -55,6 +55,9 @@ def main():
         config.training.per_gpu_batch_size = args.batch_size
     if args.epochs:
         config.training.num_epochs = args.epochs
+    else:
+        # Set default number of epochs to 25
+        config.training.num_epochs = 25
     if args.lr:
         config.training.learning_rate = args.lr
     

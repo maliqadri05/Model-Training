@@ -8,6 +8,8 @@ from PIL import Image
 from typing import Dict, Any
 import logging
 from .preprocessors import ImagePreprocessor, TextPreprocessor
+from transformers import AutoTokenizer
+from config import Config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,6 +55,19 @@ class MedicalImageTextDataset(Dataset):
         # Initialize preprocessors
         self.image_preprocessor = ImagePreprocessor(target_size=image_size)
         self.text_preprocessor = TextPreprocessor()
+        # Ensure we have a tokenizer for text. Some processors don't include a tokenizer
+        # (or may not return attention_mask when used as a combined processor). We
+        # prefer to use the processor for images only and a tokenizer for text so
+        # the dataset always returns input_ids and attention_mask tensors.
+        try:
+            # If the provided processor wraps a tokenizer, try to grab it
+            self.tokenizer = getattr(processor, "tokenizer", None)
+            if self.tokenizer is None:
+                cfg = Config()
+                self.tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name)
+        except Exception:
+            cfg = Config()
+            self.tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name)
     
     def __len__(self) -> int:
         return len(self.data)
@@ -72,19 +87,43 @@ class MedicalImageTextDataset(Dataset):
         # Preprocess text
         text = self.text_preprocessor.preprocess(row['text'])
         
-        # Process with SigLIP processor
-        inputs = self.processor(
-            text=[text],
-            images=image,
-            return_tensors="pt",
-            padding="max_length",
+        # Process image with the processor / feature extractor to get pixel values
+        image_inputs = self.processor(images=image, return_tensors="pt")
+        # Fix ambiguous tensor evaluation
+        pixel_values = image_inputs.get('pixel_values')
+        if pixel_values is None:
+            raise ValueError("Processor did not return 'pixel_values'. Check the processor configuration.")
+        pixel_values = pixel_values.squeeze(0)
+
+        # Tokenize text with tokenizer to guarantee attention_mask exists
+        text_inputs = self.tokenizer(
+            text,
+            padding='max_length',
+            truncation=True,
             max_length=self.text_max_length,
-            truncation=True
+            return_tensors='pt'
         )
-        
+
+        # Debugging tokenizer output
+        print(f"Tokenizer output for text '{text}': {text_inputs}")
+
+        # Ensure attention_mask matches input_ids size
+        if 'attention_mask' not in text_inputs:
+            attention_mask = torch.ones_like(text_inputs['input_ids'])
+        else:
+            attention_mask = text_inputs['attention_mask']
+
+        # Ensure both tensors have consistent shapes
+        input_ids = text_inputs['input_ids'].squeeze(0)
+        attention_mask = attention_mask.squeeze(0)
+
+        # Debugging: Log the shapes of tensors
+        print(f"attention_mask shape: {attention_mask.shape}")
+        print(f"input_ids shape: {input_ids.shape}")
+
         return {
-            'pixel_values': inputs['pixel_values'].squeeze(0),
-            'input_ids': inputs['input_ids'].squeeze(0),
-            'attention_mask': inputs['attention_mask'].squeeze(0),
+            'pixel_values': pixel_values,
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
             'source': row['source']
         }
